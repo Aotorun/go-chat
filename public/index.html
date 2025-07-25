@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GoChat</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; display: flex; height: 100vh; margin: 0; background-color: #f4f4f8; }
+        #sidebar { width: 280px; border-right: 1px solid #ddd; padding: 15px; display: flex; flex-direction: column; background-color: #fff; }
+        #chat-area { flex-grow: 1; display: flex; flex-direction: column; }
+        #messages { flex-grow: 1; padding: 20px; overflow-y: auto; }
+        #message-form { display: flex; padding: 15px; border-top: 1px solid #ddd; background-color: #fff; }
+        #message-input { flex-grow: 1; padding: 10px; border: 1px solid #ccc; border-radius: 20px; }
+        #login-view, #chat-view { width: 100%; height: 100%; }
+        #login-view { display: flex; justify-content: center; align-items: center; }
+        #login-form-container { padding: 30px; background: #fff; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+        #chat-view { display: none; }
+        .room-item { cursor: pointer; padding: 10px; border-radius: 6px; margin-bottom: 5px; }
+        .room-item:hover { background-color: #f0f0f0; }
+        .room-item.active { background-color: #e0e7ff; font-weight: bold; }
+        .message { margin-bottom: 15px; }
+        .message .username { font-weight: bold; color: #333; }
+        .message .timestamp { font-size: 0.8em; color: #888; margin-left: 10px; }
+        .message .content { margin-top: 4px; }
+        button { padding: 10px 15px; border: none; background-color: #4a69ff; color: white; border-radius: 5px; cursor: pointer; }
+        button:hover { background-color: #3b55cc; }
+        input { padding: 10px; border: 1px solid #ccc; border-radius: 5px; width: calc(100% - 22px); margin-bottom: 10px; }
+    </style>
+</head>
+<body>
+
+<div id="login-view">
+    <div id="login-form-container">
+        <h2>Вход в GoChat</h2>
+        <form id="login-form">
+            <input type="email" id="email" placeholder="Email (например, test@test.com)" required><br>
+            <input type="password" id="password" placeholder="Пароль (например, password)" required><br>
+            <button type="submit">Войти</button>
+        </form>
+        <p style="font-size: 0.9em; color: #666;">Нет аккаунта? Сначала зарегистрируйтесь через API (Postman/curl).</p>
+    </div>
+</div>
+
+<div id="chat-view">
+    <div id="sidebar">
+        <h3>Комнаты</h3>
+        <div id="room-list"></div>
+        <hr>
+        <form id="create-room-form">
+            <input type="text" id="room-name-input" placeholder="Название новой комнаты" required>
+            <button type="submit">Создать</button>
+        </form>
+        <button id="logout-btn" style="margin-top: auto; background-color: #d9534f;">Выйти</button>
+    </div>
+    <div id="chat-area">
+        <h2 id="current-room-name" style="padding: 15px; margin: 0; border-bottom: 1px solid #ddd; background-color: #fff;">Выберите комнату</h2>
+        <div id="messages"></div>
+        <form id="message-form" style="display: none;">
+            <input type="text" id="message-input" placeholder="Напишите сообщение..." autocomplete="off">
+            <button type="submit" style="margin-left: 10px;">Отправить</button>
+        </form>
+    </div>
+</div>
+
+<script>
+    const loginView = document.getElementById('login-view');
+    const chatView = document.getElementById('chat-view');
+    const loginForm = document.getElementById('login-form');
+    const roomList = document.getElementById('room-list');
+    const createRoomForm = document.getElementById('create-room-form');
+    const messagesDiv = document.getElementById('messages');
+    const messageForm = document.getElementById('message-form');
+    const messageInput = document.getElementById('message-input');
+    const currentRoomName = document.getElementById('current-room-name');
+    const logoutBtn = document.getElementById('logout-btn');
+
+    let token = localStorage.getItem('jwt_token');
+    let currentRoomId = null;
+    let ws = null;
+
+    // --- Основная логика ---
+    if (token) {
+        showChatView();
+    }
+
+    // --- Обработчики событий ---
+    loginForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const email = document.getElementById('email').value;
+        const password = document.getElementById('password').value;
+        try {
+            const res = await fetch('/api/v1/login', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ email, password })
+            });
+            if (!res.ok) throw new Error('Ошибка входа. Проверьте email и пароль.');
+            const data = await res.json();
+            token = data.token;
+            localStorage.setItem('jwt_token', token);
+            showChatView();
+        } catch (error) {
+            alert(error.message);
+        }
+    });
+
+    createRoomForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const roomName = document.getElementById('room-name-input').value;
+        if (!roomName) return;
+        try {
+            await fetch('/api/v1/rooms', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`
+                },
+                body: JSON.stringify({ name: roomName })
+            });
+            document.getElementById('room-name-input').value = '';
+            getRooms();
+        } catch (error) {
+            alert(error.message);
+        }
+    });
+
+    messageForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const content = messageInput.value;
+        if (!content || !currentRoomId) return;
+        try {
+            await fetch(`/api/v1/rooms/${currentRoomId}/messages`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`
+                },
+                body: JSON.stringify({ content })
+            });
+            messageInput.value = '';
+        } catch (error) {
+            alert(error.message);
+        }
+    });
+
+    logoutBtn.addEventListener('click', () => {
+        token = null;
+        localStorage.removeItem('jwt_token');
+        if (ws) ws.close();
+        showLoginView();
+    });
+
+    // --- Функции ---
+    function showChatView() {
+        loginView.style.display = 'none';
+        chatView.style.display = 'flex';
+        getRooms();
+    }
+
+    function showLoginView() {
+        loginView.style.display = 'flex';
+        chatView.style.display = 'none';
+    }
+
+    async function getRooms() {
+        try {
+            const res = await fetch('/api/v1/rooms', { headers: { 'Authorization': `Bearer ${token}` } });
+            if (res.status === 401) return logoutBtn.click();
+            const rooms = await res.json() || [];
+            roomList.innerHTML = '';
+            rooms.forEach(room => {
+                const roomEl = document.createElement('div');
+                roomEl.className = 'room-item';
+                roomEl.textContent = room.name;
+                roomEl.onclick = (event) => selectRoom(event, room.id, room.name);
+                roomList.appendChild(roomEl);
+            });
+        } catch (error) { console.error(error); }
+    }
+
+    async function selectRoom(event, roomId, roomName) {
+        if (ws) ws.close();
+        currentRoomId = roomId;
+        currentRoomName.textContent = roomName;
+        messagesDiv.innerHTML = '';
+        messageForm.style.display = 'flex';
+
+        document.querySelectorAll('.room-item').forEach(el => el.classList.remove('active'));
+        event.target.classList.add('active');
+
+        const res = await fetch(`/api/v1/rooms/${roomId}/messages`, { headers: { 'Authorization': `Bearer ${token}` } });
+        const messages = await res.json() || [];
+        messages.forEach(addMessage);
+
+        const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        ws = new WebSocket(`${wsProtocol}//${window.location.host}/api/v1/ws/rooms/${roomId}?token=${token}`);
+        ws.onmessage = (event) => addMessage(JSON.parse(event.data));
+    }
+
+    function addMessage(message) {
+        const msgEl = document.createElement('div');
+        msgEl.className = 'message';
+        msgEl.innerHTML = `
+            <div>
+                <span class="username">${message.username || 'System'}</span>
+                <span class="timestamp">${new Date(message.created_at).toLocaleTimeString()}</span>
+            </div>
+            <div class="content">${message.content}</div>
+        `;
+        messagesDiv.appendChild(msgEl);
+        messagesDiv.scrollTop = messagesDiv.scrollHeight;
+    }
+</script>
+</body>
+</html>
